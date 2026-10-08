@@ -162,11 +162,6 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
                 // 2. Fetch the last snapshot timestamp (using our core SQL method)
                 $last_snapshot_time = $this->getLastSnapshotTimestamp($localProjectId);
 
-                $this->log("AutoSnapshot: checking project for design changes", [
-                    'project_id' => $localProjectId,
-                    'last_snapshot_time' => $last_snapshot_time === false ? null : $last_snapshot_time,
-                ]);
-
                 if ($last_snapshot_time === false) {
                     // No snapshot has ever been taken for this project. Don't gate the very first
                     // snapshot on finding a MANAGE/redcap_metadata log row: a project whose fields
