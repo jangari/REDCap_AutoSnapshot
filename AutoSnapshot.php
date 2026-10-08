@@ -5,6 +5,8 @@ namespace INTERSECT\AutoSnapshot;
 use \REDCap as REDCap;
 use \MetaData as MetaData;
 use \Project as Project;
+use \Files as Files;
+use \User as User;
 
 class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
 
@@ -35,6 +37,53 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
         return false;
     }
 
+    /**
+     * Creates a data dictionary snapshot for an arbitrary project, correctly scoped
+     * to $project_id.
+     *
+     * Reimplements MetaData::createDataDictionarySnapshot() rather than calling it directly:
+     * that method takes a $project_id argument but never forwards it into its internal
+     * MetaData::getDataDictionary() call, which falls back to the request-scoped PROJECT_ID
+     * constant instead. Since a cron loops over many projects in one request, PROJECT_ID is
+     * either undefined or stuck on the wrong project, so the exported CSV would not actually
+     * match $project_id even though the resulting redcap_data_dictionaries row would claim it does.
+     * getDataDictionary()'s $project_id_override parameter (8th) and Files::uploadFile()'s
+     * $project_id parameter (2nd) are both correctly honored, so we use those directly instead.
+     *
+     * @param int $project_id
+     * @return bool true on success
+     */
+    private function createProjectDataDictionarySnapshot($project_id)
+    {
+        $dd_snapshot_filename = APP_PATH_TEMP . date('YmdHis') . "_DataDictionary_" . substr(sha1(rand()), 0, 6) . ".csv";
+
+        // draft_mode forced false: no online-designer "draft" state is meaningful for a
+        // cron with no logged-in user, so always snapshot the live/production metadata.
+        $dd_snapshot = MetaData::getDataDictionary('csv', true, [], [], false, false, null, $project_id);
+        $dd_snapshot = addBOMtoUTF8($dd_snapshot);
+        file_put_contents($dd_snapshot_filename, $dd_snapshot);
+
+        // Simulate a file upload for storing in edocs table (same approach as core)
+        $ddfile = [
+            'name' => basename($dd_snapshot_filename),
+            'type' => 'application/csv',
+            'size' => filesize($dd_snapshot_filename),
+            'tmp_name' => $dd_snapshot_filename,
+        ];
+        $dd_edoc_id = Files::uploadFile($ddfile, $project_id);
+
+        if (file_exists($dd_snapshot_filename)) unlink($dd_snapshot_filename);
+
+        $user_info = defined("USERID") ? User::getUserInfo(USERID) : [];
+
+        $sql = "INSERT INTO redcap_data_dictionaries (doc_id, project_id, ui_id) VALUES (?, ?, ?)";
+        return $this->query($sql, [
+            $dd_edoc_id,
+            $project_id,
+            $user_info['ui_id'] ?? null, // Could be null on External Module importDataDictionary() calls from crons
+        ]);
+    }
+
     public function runDailySnapshotCheck($cronInfo) {
         foreach ($this->getProjectsWithModuleEnabled() as $localProjectId) {
             $this->setProjectId($localProjectId);
@@ -63,7 +112,7 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
 
             if ($result && $result->num_rows > 0) {
                 // A structural dictionary change happened! Take a new snapshot.
-                MetaData::createDataDictionarySnapshot($localProjectId);
+                $this->createProjectDataDictionarySnapshot($localProjectId);
                 // Log it
                 REDCap::logEvent(
                     "Automated Data Dictionary Snapshot Created",
