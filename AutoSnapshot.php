@@ -98,6 +98,48 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
     }
 
     /**
+     * Whether this site's redcap_data_dictionaries table has the "comments" column REDCap added
+     * in a recent release (confirmed live: present in 19.9.9, absent in 17.4.1 -- column name is
+     * "comments", plural, not "comment"; there's also a comments_attachment_doc_id column for an
+     * attached file, which we have no use for and always leave NULL). Not every site will be on
+     * a version that has it, so this is feature-detected once per request rather than assumed --
+     * omitting it entirely on older sites rather than failing the whole insert.
+     *
+     * @return bool
+     */
+    private function supportsSnapshotComments()
+    {
+        static $supported = null;
+        if ($supported === null) {
+            $result = $this->query("SHOW COLUMNS FROM redcap_data_dictionaries LIKE 'comments'", []);
+            $supported = $result && $result->num_rows > 0;
+        }
+        return $supported;
+    }
+
+    /**
+     * Comment text for a snapshot, tailored to why autoSnapshot() took it. Shown inline in core's
+     * own Project Revision History page (confirmed: renderSnapshotComments() there truncates at
+     * 25 words with a "show more" popover) -- kept under that so nothing gets cut off.
+     *
+     * @param string|null $reason one of autoSnapshot()'s $reason values, or null
+     * @return string
+     */
+    private function getSnapshotComment($reason)
+    {
+        switch ($reason) {
+            case 'no_prior_history':
+                return 'Automated baseline snapshot (no prior snapshot or design-change history existed for this project).';
+            case 'settled':
+                return 'Automated snapshot: design changes detected and settled after the configured quiet period.';
+            case 'max_staleness':
+                return 'Automated snapshot: forced after design changes remained pending longer than the configured maximum staleness period.';
+            default:
+                return 'Automated snapshot created by the AutoSnapshot module.';
+        }
+    }
+
+    /**
      * Creates a data dictionary snapshot for an arbitrary project, correctly scoped
      * to $project_id.
      *
@@ -107,9 +149,11 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
      * undefined (or stuck on one project) for the life of a cron request that loops over many.
      *
      * @param int $project_id
+     * @param string|null $reason why this snapshot is being taken (see autoSnapshot()) -- used
+     *   only to tailor the comment text above; has no effect on sites without that column.
      * @return bool true on success
      */
-    private function createProjectDataDictionarySnapshot($project_id)
+    private function createProjectDataDictionarySnapshot($project_id, $reason = null)
     {
         $dd_snapshot_filename = APP_PATH_TEMP . date('YmdHis') . "_DataDictionary_" . substr(sha1(rand()), 0, 6) . ".csv";
 
@@ -149,16 +193,15 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
             return false;
         }
 
-        $sql = "INSERT INTO redcap_data_dictionaries (doc_id, project_id, ui_id) VALUES (?, ?, ?)";
-        return $this->query($sql, [
-            $dd_edoc_id,
-            $project_id,
-            // ui_id always NULL: this snapshot is automated, not a user action, even when a logged-in
-            // admin manually triggers the cron via "Run Cron" for testing. Project Revision History
-            // shows no "Snapshot by ..." text at all for a NULL ui_id (it can't show a custom label
-            // like "System" -- that column is a straight join against redcap_user_information).
-            null,
-        ]);
+        if ($this->supportsSnapshotComments()) {
+            $sql = "INSERT INTO redcap_data_dictionaries (doc_id, project_id, ui_id, comments) VALUES (?, ?, ?, ?)";
+            $params = [$dd_edoc_id, $project_id, null, $this->getSnapshotComment($reason)];
+        } else {
+            $sql = "INSERT INTO redcap_data_dictionaries (doc_id, project_id, ui_id) VALUES (?, ?, ?)";
+            $params = [$dd_edoc_id, $project_id, null]; // ui_id always NULL
+        }
+
+        return $this->query($sql, $params);
     }
 
     /**
@@ -418,7 +461,7 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
 
                 if ($needsSnapshot) {
                     // A structural dictionary change happened (or this is a baseline/forced snapshot).
-                    $snapshotCreated = $this->createProjectDataDictionarySnapshot($localProjectId);
+                    $snapshotCreated = $this->createProjectDataDictionarySnapshot($localProjectId, $reason);
 
                     $this->log("AutoSnapshot: design change detected", [
                         'project_id' => $localProjectId,

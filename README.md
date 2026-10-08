@@ -43,6 +43,12 @@ Once enabled system-wide, the module registers two crons:
      end-state, not mid-edit -- or once a pending change has been waiting longer than the
      maximum-staleness safety valve, whichever comes first (see Configuration).
 
+  On REDCap versions that have it (the `comments` column on data dictionary snapshots, added in a
+  recent core release), each automated snapshot gets a short comment explaining why it was taken
+  (baseline, settled, or forced by staleness) -- visible inline in Project Setup's "Project
+  Revision History" page, the same place core's own manual snapshots show theirs. Sites on an
+  older version without that column are unaffected; this is feature-detected, not assumed.
+
 - **`prune_old_snapshots`** (once a day by default) deletes automated snapshots beyond each
   project's configured retention count. Snapshots taken manually, via the Design page's own
   "Create Snapshot" button, are never touched by this, regardless of count or age.
@@ -82,13 +88,14 @@ module's development, executing tasks end-to-end on request -- including diagnos
 for a core REDCap defect around cross-project data scoping, project-status/purpose filtering,
 a fix for projects with no prior snapshot being silently skipped, a performance optimisation,
 a security review (including running REDCap's own module scanner and resolving a flagged SQL
-taint issue), and the settle-window/staleness-valve debounce and automated snapshot-retention
-pruning described above. All product decisions -- including the retention semantics, the
-manual-vs-automated snapshot distinction, choosing debounce over a fuller backup-rotation
-scheme, and the settle-window/staleness defaults -- were made by Aidan Wilson, who reviewed,
-corrected, and redirected the work throughout, including live-testing changes directly against
-a running REDCap instance before they were accepted. See `AI-DECLARATION.md` for the structured
-version of this statement.
+taint issue), the settle-window/staleness-valve debounce and automated snapshot-retention
+pruning described above, and feature-detected support for the "comments" column REDCap added to
+data dictionary snapshots in a later core release. All product decisions -- including the
+retention semantics, the manual-vs-automated snapshot distinction, choosing debounce over a
+fuller backup-rotation scheme, and the settle-window/staleness defaults -- were made by Aidan
+Wilson, who reviewed, corrected, and redirected the work throughout, including live-testing
+changes directly against a running REDCap instance before they were accepted. See
+`AI-DECLARATION.md` for the structured version of this statement.
 
 ## Changelog
 
