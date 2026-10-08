@@ -48,9 +48,9 @@
 
     "crons": [
         {
-            "cron_name": "daily_snapshot",
-            "cron_description": "Checks for project metadata changes daily and takes a data dictionary snapshot.",
-            "method": "runDailySnapshotCheck",
+            "cron_name": "auto_snapshot",
+            "cron_description": "Checks for project metadata changes and takes a data dictionary snapshot.",
+            "method": "autoSnapshot",
             "cron_frequency": "1800",
              "cron_max_run_time": "86400"
         }

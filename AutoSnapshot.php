@@ -122,7 +122,7 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
         ]);
     }
 
-    public function runDailySnapshotCheck($cronInfo) {
+    public function autoSnapshot($cronInfo) {
         foreach ($this->getProjectsWithModuleEnabled() as $localProjectId) {
             try {
                 $this->setProjectId($localProjectId);
