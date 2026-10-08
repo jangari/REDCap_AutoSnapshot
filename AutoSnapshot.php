@@ -218,12 +218,22 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
 
     /**
      * Minutes of design-change quiet required before a detected change is snapshotted, per the
-     * "Design Change Settle Window" system setting. Falls back to 15 minutes when unset/blank --
-     * long enough to ride out a burst of related Online Designer edits (rename a field, adjust its
-     * branching logic, add a validation type) as one editing session, short enough to still land
-     * within a tick or two of cron_frequency's default 30-minute interval. 0 is a deliberate,
-     * documented escape hatch back to "snapshot on the very next tick that sees any change" --
-     * no enforced floor.
+     * "Design Change Settle Window" system setting. Falls back to 60 minutes when unset/blank.
+     *
+     * Not derived from cron_frequency's default 30-minute interval (an earlier version of this
+     * defaulted to 15 minutes specifically to land within one tick of that value -- a tick-
+     * alignment convenience, not a model of real editing behaviour). Revised after recognising
+     * that a genuine REDCap build session routinely includes gaps well past 15 minutes -- add a
+     * field, go test it in the form/survey, come back and adjust branching logic or validation,
+     * test again -- while the person is clearly still mid-task, not done. A window shorter than
+     * those natural gaps would frequently declare "settled" mid-session and snapshot a half-wired
+     * state, undermining the entire point of debouncing. 60 minutes tolerates that build-test-
+     * iterate rhythm; the cost is a longer worst-case time-to-first-backup (roughly this value
+     * plus up to one cron interval), a deliberate trade in favour of a clean snapshot over a
+     * faster but more likely mid-task one. 0 is a deliberate, documented escape hatch back to
+     * "snapshot on the very next tick that sees any change" -- no enforced floor, unlike the
+     * retention count below (a numeric-magnitude setting going to its minimum is harmless here;
+     * it isn't for deleting snapshots).
      *
      * @return int minutes, always >= 0
      */
@@ -231,7 +241,7 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
     {
         $value = $this->getSystemSetting('design-settle-window-minutes');
         if ($value === null || $value === '') {
-            return 15;
+            return 60;
         }
         return max(0, (int)$value);
     }
@@ -239,7 +249,11 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
     /**
      * Hours a design change can remain un-snapshotted before one is forced regardless of ongoing
      * edits -- the safety valve for a project edited near-continuously, which might otherwise
-     * never go quiet for the full settle window above. Falls back to 24 hours when unset/blank.
+     * never go quiet for the full settle window above. Falls back to 12 hours when unset/blank:
+     * long enough not to interrupt a genuine, continuous real-world build session, short enough
+     * that it corresponds to a single normal working stretch -- it's hard to imagine someone
+     * actively developing a project for longer than that without a real break, at which point the
+     * settle-window check above would have already caught it anyway.
      *
      * @return int hours, always >= 0
      */
@@ -247,7 +261,7 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
     {
         $value = $this->getSystemSetting('max-staleness-hours');
         if ($value === null || $value === '') {
-            return 24;
+            return 12;
         }
         return max(0, (int)$value);
     }
