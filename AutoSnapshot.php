@@ -4,7 +4,6 @@ namespace INTERSECT\AutoSnapshot;
 
 use \REDCap as REDCap;
 use \MetaData as MetaData;
-use \Project as Project;
 use \Files as Files;
 
 class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
@@ -34,6 +33,34 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
         }
 
         return false;
+    }
+
+    /**
+     * Whether automated snapshotting is enabled for a given project purpose, per the
+     * "Enable for ... projects" system-setting checkboxes.
+     *
+     * @param int|string $purpose
+     * @return bool
+     */
+    private function isPurposeEnabled($purpose)
+    {
+        $settingKeyByPurpose = [
+            0 => 'enable-purpose-practice',
+            1 => 'enable-purpose-other',
+            2 => 'enable-purpose-research',
+            3 => 'enable-purpose-quality',
+            4 => 'enable-purpose-ops',
+        ];
+
+        $key = $settingKeyByPurpose[(int)$purpose] ?? null;
+        if ($key === null) {
+            // Unrecognized purpose value (e.g. a future core addition) -- fail open rather than
+            // silently stop snapshotting a project this module has no opinion about.
+            return true;
+        }
+
+        $value = $this->getSystemSetting($key);
+        return $value === null ? true : (bool)$value;
     }
 
     /**
@@ -96,9 +123,37 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
             try {
                 $this->setProjectId($localProjectId);
 
-                // 1. Get the project-specific log table name dynamically
-                $project = new Project($localProjectId);
-                $log_table = $project->project['log_event_table'];
+                // 1. Get the project's status/purpose/log table via a lightweight column read.
+                // NOT new Project($localProjectId): core's Project::__construct() unconditionally
+                // loads the entire project (loadMetadata/loadEvents/loadEventsForms/loadSurveys) --
+                // benchmarked in this dev instance at ~14x slower per project than reading these
+                // three plain columns directly. At scale (looping over every enabled project on
+                // every cron tick) that difference is the dominant cost of this whole method.
+                $projectRow = $this->query(
+                    "SELECT status, purpose, log_event_table FROM redcap_projects WHERE project_id = ?",
+                    [$localProjectId]
+                )->fetch_assoc();
+
+                if (!$projectRow) {
+                    continue;
+                }
+
+                // Production (status 1) and Analysis/Cleanup (status 2) projects already get a data
+                // dictionary snapshot automatically whenever a draft is published (see Project::status
+                // usage in core, e.g. Classes/Project.php's "$status > 0 && $draft_mode > 0" checks).
+                // This module exists to cover Development (status 0) projects, which have no such
+                // built-in snapshotting, so skip anything not in development.
+                if ($projectRow['status'] != 0) {
+                    continue;
+                }
+
+                // Let admins opt whole project-purpose categories out (e.g. Practice/Just-for-fun
+                // projects, which can churn through design changes without being worth backing up).
+                if (!$this->isPurposeEnabled($projectRow['purpose'])) {
+                    continue;
+                }
+
+                $log_table = $projectRow['log_event_table'];
 
                 // 2. Fetch the last snapshot timestamp (using our core SQL method)
                 $last_snapshot_time = $this->getLastSnapshotTimestamp($localProjectId);

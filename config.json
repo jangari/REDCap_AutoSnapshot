@@ -18,6 +18,34 @@
 
     "framework-version": 16,
 
+    "system-settings": [
+        {
+            "key": "enable-purpose-practice",
+            "name": "Enable for <b>Practice / Just for fun</b> projects",
+            "type": "checkbox"
+        },
+        {
+            "key": "enable-purpose-other",
+            "name": "Enable for <b>Other</b> projects",
+            "type": "checkbox"
+        },
+        {
+            "key": "enable-purpose-research",
+            "name": "Enable for <b>Research</b> projects",
+            "type": "checkbox"
+        },
+        {
+            "key": "enable-purpose-quality",
+            "name": "Enable for <b>Quality Improvement</b> projects",
+            "type": "checkbox"
+        },
+        {
+            "key": "enable-purpose-ops",
+            "name": "Enable for <b>Operational Support</b> projects",
+            "type": "checkbox"
+        }
+    ],
+
     "crons": [
         {
             "cron_name": "daily_snapshot",
