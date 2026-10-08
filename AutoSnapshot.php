@@ -6,7 +6,6 @@ use \REDCap as REDCap;
 use \MetaData as MetaData;
 use \Project as Project;
 use \Files as Files;
-use \User as User;
 
 class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
 
@@ -43,12 +42,8 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
      *
      * Reimplements MetaData::createDataDictionarySnapshot() rather than calling it directly:
      * that method takes a $project_id argument but never forwards it into its internal
-     * MetaData::getDataDictionary() call, which falls back to the request-scoped PROJECT_ID
-     * constant instead. Since a cron loops over many projects in one request, PROJECT_ID is
-     * either undefined or stuck on the wrong project, so the exported CSV would not actually
-     * match $project_id even though the resulting redcap_data_dictionaries row would claim it does.
-     * getDataDictionary()'s $project_id_override parameter (8th) and Files::uploadFile()'s
-     * $project_id parameter (2nd) are both correctly honored, so we use those directly instead.
+     * getDataDictionary() call, which falls back to the PROJECT_ID constant instead
+     * undefined (or stuck on one project) for the life of a cron request that loops over many.
      *
      * @param int $project_id
      * @return bool true on success
@@ -74,54 +69,88 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
 
         if (file_exists($dd_snapshot_filename)) unlink($dd_snapshot_filename);
 
-        $user_info = defined("USERID") ? User::getUserInfo(USERID) : [];
+        // Files::uploadFile() returns 0 on failure (disallowed file type, storage write failure, etc.).
+        // Inserting doc_id=0 would violate redcap_data_dictionaries' FK to redcap_edocs_metadata, so
+        // bail out here instead of letting that exception propagate and abort the whole cron run.
+        if (empty($dd_edoc_id)) {
+            $this->log("AutoSnapshot: snapshot upload failed, skipping insert", [
+                'project_id' => $project_id,
+            ]);
+            return false;
+        }
 
         $sql = "INSERT INTO redcap_data_dictionaries (doc_id, project_id, ui_id) VALUES (?, ?, ?)";
         return $this->query($sql, [
             $dd_edoc_id,
             $project_id,
-            $user_info['ui_id'] ?? null, // Could be null on External Module importDataDictionary() calls from crons
+            // ui_id always NULL: this snapshot is automated, not a user action, even when a logged-in
+            // admin manually triggers the cron via "Run Cron" for testing. Project Revision History
+            // shows no "Snapshot by ..." text at all for a NULL ui_id (it can't show a custom label
+            // like "System" -- that column is a straight join against redcap_user_information).
+            null,
         ]);
     }
 
     public function runDailySnapshotCheck($cronInfo) {
         foreach ($this->getProjectsWithModuleEnabled() as $localProjectId) {
-            $this->setProjectId($localProjectId);
+            try {
+                $this->setProjectId($localProjectId);
 
-            // 1. Get the project-specific log table name dynamically
-            $project = new Project($localProjectId);
-            $log_table = $project->project['log_event_table'];
+                // 1. Get the project-specific log table name dynamically
+                $project = new Project($localProjectId);
+                $log_table = $project->project['log_event_table'];
 
-            // 2. Fetch the last snapshot timestamp (using our core SQL method)
-            $last_snapshot_time = $this->getLastSnapshotTimestamp($localProjectId);
+                // 2. Fetch the last snapshot timestamp (using our core SQL method)
+                $last_snapshot_time = $this->getLastSnapshotTimestamp($localProjectId);
 
-            // 3. Format timestamp to match REDCap log style (YYYYMMDDHHMMSS)
-            // If false (no snapshot exists), default to 0 to capture ALL history
-            $formatted_snapshot_ts = $last_snapshot_time ? date("YmdHis", strtotime($last_snapshot_time)) : 0;
+                // 3. Format timestamp to match REDCap log style (YYYYMMDDHHMMSS)
+                // If false (no snapshot exists), default to 0 to capture ALL history
+                $formatted_snapshot_ts = $last_snapshot_time ? date("YmdHis", strtotime($last_snapshot_time)) : 0;
 
-            // 4. Query for metadata management modifications since the last snapshot
-            $sql = "SELECT ts
-                FROM `$log_table`
-                WHERE project_id = ?
-                AND event = 'MANAGE'
-                AND object_type = 'redcap_metadata'
-                AND ts > ?
-                LIMIT 1";
+                $this->log("AutoSnapshot: checking project for design changes", [
+                    'project_id' => $localProjectId,
+                    'last_snapshot_ts' => (string)$formatted_snapshot_ts,
+                ]);
 
-            $result = $this->query($sql, [$localProjectId, $formatted_snapshot_ts]);
+                // 4. Query for metadata management modifications since the last snapshot
+                $sql = "SELECT ts
+                    FROM `$log_table`
+                    WHERE project_id = ?
+                    AND event = 'MANAGE'
+                    AND object_type = 'redcap_metadata'
+                    AND ts > ?
+                    LIMIT 1";
 
-            if ($result && $result->num_rows > 0) {
-                // A structural dictionary change happened! Take a new snapshot.
-                $this->createProjectDataDictionarySnapshot($localProjectId);
-                // Log it
-                REDCap::logEvent(
-                    "Automated Data Dictionary Snapshot Created",
-                    "The snapshot module automatically backed up project ID $localProjectId's data dictionary due to detected design modifications.",
-                    null,  // Action/SQL
-                    null,  // Record ID
-                    null,  // Event ID
-                    null   // Project ID (CRITICAL: Pass null so it logs globally to System, not Project)
-                );
+                $result = $this->query($sql, [$localProjectId, $formatted_snapshot_ts]);
+
+                if ($result && $result->num_rows > 0) {
+                    // A structural dictionary change happened! Take a new snapshot.
+                    $snapshotCreated = $this->createProjectDataDictionarySnapshot($localProjectId);
+
+                    $this->log("AutoSnapshot: design change detected", [
+                        'project_id' => $localProjectId,
+                        'snapshot_created' => $snapshotCreated ? 1 : 0,
+                    ]);
+
+                    if ($snapshotCreated) {
+                        // Log it
+                        REDCap::logEvent(
+                            "Automated Data Dictionary Snapshot Created",
+                            "The snapshot module automatically backed up project ID $localProjectId's data dictionary due to detected design modifications.",
+                            null,  // Action/SQL
+                            null,  // Record ID
+                            null,  // Event ID
+                            null   // Project ID (Pass null so it logs globally to System, not Project)
+                        );
+                    }
+                }
+            } catch (\Throwable $e) {
+                // Don't let one project's failure (e.g. a snapshot upload error) stop the rest
+                // of the loop from being checked.
+                $this->log("AutoSnapshot: error while processing project", [
+                    'project_id' => $localProjectId,
+                    'error' => $e->getMessage(),
+                ]);
             }
         }
 
