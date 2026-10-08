@@ -89,6 +89,19 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
         $dd_snapshot = addBOMtoUTF8($dd_snapshot);
         file_put_contents($dd_snapshot_filename, $dd_snapshot);
 
+        // Ensure the project's local-storage edocs subfolder exists before attempting the upload.
+        // Confirmed the hard way: when local_storage_use_project_subfolder is enabled (it is on
+        // this instance), Files::uploadFile()'s LOCAL-storage branch tries move_uploaded_file(),
+        // then rename(), then file_put_contents() against EDOC_PATH/pid<N>/... -- none of which
+        // create a missing parent directory. A real browser-based upload always goes through a
+        // page/AJAX handler that calls Files::detectProjectLevelLocalStorage() first (it creates
+        // the "pid<N>" subfolder via mkdir() if missing and verifies it's writable); our simulated
+        // upload skipped that step entirely, so it silently failed (returned 0, source file left
+        // untouched) for every project whose subfolder hadn't already been created by unrelated
+        // prior activity. Verified against this dev instance: pid43's subfolder didn't exist and
+        // every snapshot attempt failed; calling this first creates it and the same upload succeeds.
+        Files::detectProjectLevelLocalStorage($project_id);
+
         // Simulate a file upload for storing in edocs table (same approach as core)
         $ddfile = [
             'name' => basename($dd_snapshot_filename),
