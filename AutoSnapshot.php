@@ -122,6 +122,26 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
         ]);
     }
 
+    /**
+     * Validates that a project's log_event_table value is really one of REDCap's own log-event
+     * tables before it's ever used as a SQL identifier.
+     *
+     * @param mixed $log_table
+     * @return string|null the validated table name, or null if it doesn't match
+     */
+    private function sanitizeLogEventTableName($log_table)
+    {
+        static $validTableNames = null;
+        if ($validTableNames === null) {
+            $validTableNames = ['redcap_log_event' => 'redcap_log_event'];
+            for ($i = 2; $i <= 99; $i++) {
+                $validTableNames['redcap_log_event' . $i] = 'redcap_log_event' . $i;
+            }
+        }
+
+        return is_string($log_table) ? ($validTableNames[$log_table] ?? null) : null;
+    }
+
     public function autoSnapshot($cronInfo) {
         foreach ($this->getProjectsWithModuleEnabled() as $localProjectId) {
             try {
@@ -157,7 +177,15 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
                     continue;
                 }
 
-                $log_table = $projectRow['log_event_table'];
+                // $projectRow['log_event_table'] gets interpolated into a SQL identifier below (table
+                // names can't be bound as query parameters the way values can), so it's validated
+                // against REDCap's own naming contract for these tables first, rather than trusted
+                // as-is just because it's DB-sourced. A project row that fails this is corrupt/
+                // unexpected; skip it.
+                $log_table = $this->sanitizeLogEventTableName($projectRow['log_event_table']);
+                if ($log_table === null) {
+                    continue;
+                }
 
                 // 2. Fetch the last snapshot timestamp (using our core SQL method)
                 $last_snapshot_time = $this->getLastSnapshotTimestamp($localProjectId);
