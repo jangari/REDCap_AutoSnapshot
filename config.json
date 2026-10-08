@@ -43,6 +43,18 @@
             "key": "enable-purpose-ops",
             "name": "Enable for <b>Operational Support</b> projects",
             "type": "checkbox"
+        },
+        {
+            "key": "design-settle-window-minutes",
+            "name": "<strong>Design Change Settle Window (in minutes)</strong><br/><em>Optional. A snapshot is taken only after this many minutes have passed with no further data dictionary changes, so a multi-edit Online Designer session is captured once at its clean end-state rather than mid-edit. Checked once per cron run (every 30 minutes by default -- see <code>cron_frequency</code> in config.json), so actual latency is this value plus up to one cron interval. Leave blank to use the default of 15 minutes.</em>",
+            "type": "text",
+            "validation": "integer"
+        },
+        {
+            "key": "max-staleness-hours",
+            "name": "<strong>Maximum Staleness Before Forced Snapshot (in hours)</strong><br/><em>Optional. Safety valve for projects edited near-continuously, which might otherwise never go quiet long enough to satisfy the settle window above. If a design change has been pending this many hours without settling, a snapshot is taken anyway. Leave blank to use the default of 24 hours.</em>",
+            "type": "text",
+            "validation": "integer"
         }
     ],
 

@@ -172,6 +172,86 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
         return is_string($log_table) ? ($validTableNames[$log_table] ?? null) : null;
     }
 
+    /**
+     * The earliest and most recent MANAGE/redcap_metadata log-event timestamps for a project,
+     * optionally restricted to rows after $sinceTimestamp. The "most recent" timestamp is the
+     * basis for the settle-window debounce below (how long ago did editing last touch the
+     * dictionary); the "earliest" timestamp is the basis for the max-staleness safety valve (how
+     * long has this project been sitting with an un-snapshotted change, whether or not it has a
+     * prior snapshot at all to measure staleness from).
+     *
+     * $log_table must already be validated by sanitizeLogEventTableName() -- see that method's
+     * docblock for why raw interpolation isn't an option here.
+     *
+     * @param int $project_id
+     * @param string $log_table pre-validated table name (see sanitizeLogEventTableName())
+     * @param string|null $sinceTimestamp YmdHis format, or null to consider all history
+     * @return array{first: string, last: string}|false both in YmdHis format, or false if no
+     *   matching rows exist
+     */
+    private function getMetadataChangeWindow($project_id, $log_table, $sinceTimestamp = null)
+    {
+        if ($sinceTimestamp === null) {
+            $sql = "SELECT MIN(ts) AS first_change_ts, MAX(ts) AS last_change_ts
+                FROM `$log_table`
+                WHERE project_id = ?
+                AND event = 'MANAGE'
+                AND object_type = 'redcap_metadata'";
+            $params = [$project_id];
+        } else {
+            $sql = "SELECT MIN(ts) AS first_change_ts, MAX(ts) AS last_change_ts
+                FROM `$log_table`
+                WHERE project_id = ?
+                AND event = 'MANAGE'
+                AND object_type = 'redcap_metadata'
+                AND ts > ?";
+            $params = [$project_id, $sinceTimestamp];
+        }
+
+        $result = $this->query($sql, $params);
+        if ($result && ($row = $result->fetch_assoc()) && $row['last_change_ts'] !== null) {
+            return ['first' => $row['first_change_ts'], 'last' => $row['last_change_ts']];
+        }
+
+        return false;
+    }
+
+    /**
+     * Minutes of design-change quiet required before a detected change is snapshotted, per the
+     * "Design Change Settle Window" system setting. Falls back to 15 minutes when unset/blank --
+     * long enough to ride out a burst of related Online Designer edits (rename a field, adjust its
+     * branching logic, add a validation type) as one editing session, short enough to still land
+     * within a tick or two of cron_frequency's default 30-minute interval. 0 is a deliberate,
+     * documented escape hatch back to "snapshot on the very next tick that sees any change" --
+     * no enforced floor.
+     *
+     * @return int minutes, always >= 0
+     */
+    private function getSettleWindowMinutes()
+    {
+        $value = $this->getSystemSetting('design-settle-window-minutes');
+        if ($value === null || $value === '') {
+            return 15;
+        }
+        return max(0, (int)$value);
+    }
+
+    /**
+     * Hours a design change can remain un-snapshotted before one is forced regardless of ongoing
+     * edits -- the safety valve for a project edited near-continuously, which might otherwise
+     * never go quiet for the full settle window above. Falls back to 24 hours when unset/blank.
+     *
+     * @return int hours, always >= 0
+     */
+    private function getMaxStalenessHours()
+    {
+        $value = $this->getSystemSetting('max-staleness-hours');
+        if ($value === null || $value === '') {
+            return 24;
+        }
+        return max(0, (int)$value);
+    }
+
     public function autoSnapshot($cronInfo) {
         foreach ($this->getProjectsWithModuleEnabled() as $localProjectId) {
             try {
@@ -219,38 +299,62 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
 
                 // 2. Fetch the last snapshot timestamp (using our core SQL method)
                 $last_snapshot_time = $this->getLastSnapshotTimestamp($localProjectId);
+                $sinceTimestamp = $last_snapshot_time === false ? null : date("YmdHis", strtotime($last_snapshot_time));
 
-                if ($last_snapshot_time === false) {
-                    // No snapshot has ever been taken for this project. Don't gate the very first
-                    // snapshot on finding a MANAGE/redcap_metadata log row: a project whose fields
-                    // arrived via Copy Project, a template/XML import, or a bulk Data Dictionary
-                    // upload never logs that event/object_type combination, so it would otherwise
-                    // never get backed up no matter how many times the cron runs. Confirmed against
-                    // a real project in this dev instance ("Declarations Template Project", copied
-                    // from another project): it has MANAGE log rows for redcap_projects/redcap_surveys/
-                    // redcap_econsent from the copy, but none for redcap_metadata, ever. Take an
-                    // unconditional baseline snapshot instead.
+                // 3. Find the window of design changes since that snapshot (or, if there's no
+                // snapshot yet, since the project's metadata log history began). Using this window
+                // instead of just "does at least one changed row exist" is what lets the
+                // settle-window debounce and max-staleness safety valve below apply uniformly
+                // whether or not a prior snapshot exists.
+                $changeWindow = $this->getMetadataChangeWindow($localProjectId, $log_table, $sinceTimestamp);
+
+                $needsSnapshot = false;
+                $reason = null;
+
+                if ($last_snapshot_time === false && $changeWindow === false) {
+                    // No snapshot has ever been taken for this project, AND it has no
+                    // MANAGE/redcap_metadata log history at all to measure "quiet" against -- a
+                    // project whose fields arrived via Copy Project, a template/XML import, or a
+                    // bulk Data Dictionary upload never logs that event/object_type combination,
+                    // so it would otherwise never get backed up no matter how many times the cron
+                    // runs, and there's no change-timestamp to debounce against anyway. Confirmed
+                    // against a real project in this dev instance ("Declarations Template Project",
+                    // copied from another project): it has MANAGE log rows for redcap_projects/
+                    // redcap_surveys/redcap_econsent from the copy, but none for redcap_metadata,
+                    // ever. Take an unconditional baseline snapshot instead.
                     $needsSnapshot = true;
-                } else {
-                    // 3. Otherwise, only snapshot again if something has changed since that baseline.
-                    $sql = "SELECT ts
-                        FROM `$log_table`
-                        WHERE project_id = ?
-                        AND event = 'MANAGE'
-                        AND object_type = 'redcap_metadata'
-                        AND ts > ?
-                        LIMIT 1";
-
-                    $result = $this->query($sql, [$localProjectId, date("YmdHis", strtotime($last_snapshot_time))]);
-                    $needsSnapshot = $result && $result->num_rows > 0;
+                    $reason = 'no_prior_history';
+                } elseif ($changeWindow !== false) {
+                    // Something has changed since the last snapshot (or since this project's
+                    // metadata history began, if there's no snapshot yet but there is metadata log
+                    // history -- e.g. a brand-new project being actively built in Online Designer
+                    // for the first time). Only snapshot once the most recent change has gone quiet
+                    // for the configured settle window, so a multi-edit editing session is captured
+                    // once at its clean end-state rather than repeatedly mid-session.
+                    $settledThreshold = date("YmdHis", strtotime('-' . ($this->getSettleWindowMinutes() * 60) . ' seconds'));
+                    if ($changeWindow['last'] <= $settledThreshold) {
+                        $needsSnapshot = true;
+                        $reason = 'settled';
+                    } else {
+                        // Starvation safety valve: force a snapshot if the *earliest* pending
+                        // change is old enough, regardless of whether editing has gone quiet -- so
+                        // a near-continuously edited project still gets some periodic backup rather
+                        // than none until it finally pauses.
+                        $staleThreshold = date("YmdHis", strtotime('-' . ($this->getMaxStalenessHours() * 3600) . ' seconds'));
+                        if ($changeWindow['first'] <= $staleThreshold) {
+                            $needsSnapshot = true;
+                            $reason = 'max_staleness';
+                        }
+                    }
                 }
 
                 if ($needsSnapshot) {
-                    // A structural dictionary change happened (or this is the first-ever snapshot).
+                    // A structural dictionary change happened (or this is a baseline/forced snapshot).
                     $snapshotCreated = $this->createProjectDataDictionarySnapshot($localProjectId);
 
                     $this->log("AutoSnapshot: design change detected", [
                         'project_id' => $localProjectId,
+                        'reason' => $reason,
                         'snapshot_created' => $snapshotCreated ? 1 : 0,
                     ]);
 
