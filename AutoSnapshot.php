@@ -39,6 +39,11 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
      * Whether automated snapshotting is enabled for a given project purpose, per the
      * "Enable for ... projects" system-setting checkboxes.
      *
+     * An unset setting (getSystemSetting() returns null) is treated as disabled: this module has
+     * never been published, so there's no existing install whose behavior needs preserving --
+     * an admin enabling the module opts each purpose in explicitly rather than getting everything
+     * by default.
+     *
      * @param int|string $purpose
      * @return bool
      */
@@ -54,13 +59,12 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
 
         $key = $settingKeyByPurpose[(int)$purpose] ?? null;
         if ($key === null) {
-            // Unrecognized purpose value (e.g. a future core addition) -- fail open rather than
-            // silently stop snapshotting a project this module has no opinion about.
-            return true;
+            // Unrecognized purpose value (e.g. a future core addition) -- fail closed, matching
+            // the opt-in default for every known purpose.
+            return false;
         }
 
-        $value = $this->getSystemSetting($key);
-        return $value === null ? true : (bool)$value;
+        return (bool)$this->getSystemSetting($key);
     }
 
     /**
