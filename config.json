@@ -1,0 +1,30 @@
+{
+
+    "name": "Auto Snapshot",
+
+    "namespace": "INTERSECT\\AutoSnapshot",
+
+    "description": "Take automatic snapshots of the project metadata while in development.",
+
+    "documentation": "README.md",
+
+    "authors": [
+        {
+            "name": "Aidan Wilson",
+            "email": "aidan.wilson@intersect.org.au",
+            "institution": "Intersect Australia"
+        }
+    ],
+
+    "framework-version": 16,
+
+    "crons": [
+        {
+            "cron_name": "daily_snapshot",
+            "cron_description": "Checks for project metadata changes daily and takes a data dictionary snapshot.",
+            "method": "runDailySnapshotCheck",
+            "cron_frequency": "1800",
+             "cron_max_run_time": "86400"
+        }
+    ]
+}
