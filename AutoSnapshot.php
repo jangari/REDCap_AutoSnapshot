@@ -68,6 +68,27 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
     }
 
     /**
+     * Read-only diagnostic for a Files::uploadFile() failure. Will log out for the admin to
+     * investigate.
+     *
+     * @param int $project_id
+     * @return bool true if local per-project subfolder storage is in use and the folder is absent
+     */
+    private function isMissingLocalStorageSubfolder($project_id)
+    {
+        if (!Files::detectProjectLevelLocalStorageGlobal()) {
+            return false; // Not using local per-project subfolder storage; not applicable.
+        }
+
+        $subfolder = Files::getLocalStorageSubfolder($project_id, true);
+        if ($subfolder === '') {
+            return false; // No subfolder recorded for this project (e.g. predates the setting).
+        }
+
+        return !is_dir(EDOC_PATH . $subfolder);
+    }
+
+    /**
      * Creates a data dictionary snapshot for an arbitrary project, correctly scoped
      * to $project_id.
      *
@@ -89,19 +110,6 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
         $dd_snapshot = addBOMtoUTF8($dd_snapshot);
         file_put_contents($dd_snapshot_filename, $dd_snapshot);
 
-        // Ensure the project's local-storage edocs subfolder exists before attempting the upload.
-        // Confirmed the hard way: when local_storage_use_project_subfolder is enabled (it is on
-        // this instance), Files::uploadFile()'s LOCAL-storage branch tries move_uploaded_file(),
-        // then rename(), then file_put_contents() against EDOC_PATH/pid<N>/... -- none of which
-        // create a missing parent directory. A real browser-based upload always goes through a
-        // page/AJAX handler that calls Files::detectProjectLevelLocalStorage() first (it creates
-        // the "pid<N>" subfolder via mkdir() if missing and verifies it's writable); our simulated
-        // upload skipped that step entirely, so it silently failed (returned 0, source file left
-        // untouched) for every project whose subfolder hadn't already been created by unrelated
-        // prior activity. Verified against this dev instance: pid43's subfolder didn't exist and
-        // every snapshot attempt failed; calling this first creates it and the same upload succeeds.
-        Files::detectProjectLevelLocalStorage($project_id);
-
         // Simulate a file upload for storing in edocs table (same approach as core)
         $ddfile = [
             'name' => basename($dd_snapshot_filename),
@@ -116,9 +124,18 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
         // Files::uploadFile() returns 0 on failure (disallowed file type, storage write failure, etc.).
         // Inserting doc_id=0 would violate redcap_data_dictionaries' FK to redcap_edocs_metadata, so
         // bail out here instead of letting that exception propagate and abort the whole cron run.
+        //
+        // Deliberately not creating the project's edocs subfolder ourselves if it's missing (an
+        // earlier version of this method did, via Files::detectProjectLevelLocalStorage()) --
+        // that's core's job (Project::setDefaults(), run once at project-creation time), not this
+        // module's. We only call Files::uploadFile(), same as core's own
+        // MetaData::createDataDictionarySnapshot(); if that fails because the subfolder never got
+        // created (or went missing), we diagnose and log it explicitly instead of silently fixing
+        // REDCap's own state out from under it.
         if (empty($dd_edoc_id)) {
             $this->log("AutoSnapshot: snapshot upload failed, skipping insert", [
                 'project_id' => $project_id,
+                'missing_local_storage_subfolder' => $this->isMissingLocalStorageSubfolder($project_id) ? 1 : 0,
             ]);
             return false;
         }
