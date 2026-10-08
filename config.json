@@ -55,6 +55,14 @@
             "name": "<strong>Maximum Staleness Before Forced Snapshot (in hours)</strong><br/><em>Optional. Safety valve for projects edited near-continuously, which might otherwise never go quiet long enough to satisfy the settle window above. If a design change has been pending this many hours without settling, a snapshot is taken anyway. Leave blank to use the default of 12 hours.</em>",
             "type": "text",
             "validation": "integer"
+        },
+        {
+            "key": "snapshot-retention-count",
+            "name": "<strong>Snapshot Retention Count</strong><br/><em>Optional. The number of automated snapshots to keep per project; older automated snapshots beyond this count are deleted by the separate \"Prune Old Snapshots\" cron. Snapshots taken manually (via the Design page's own \"Create Snapshot\" button) are never deleted, regardless of this setting. Leave blank or enter 0 to disable pruning entirely -- no automated snapshot is ever deleted. Can be overridden per project below.</em>",
+            "type": "text",
+            "validation": "integer",
+            "allow-project-overrides": true,
+            "project-name": "<strong>Snapshot Retention Count Override</strong><br/><em>Leave blank to use the system-wide default.</em>"
         }
     ],
 
@@ -65,6 +73,13 @@
             "method": "autoSnapshot",
             "cron_frequency": "1800",
              "cron_max_run_time": "86400"
+        },
+        {
+            "cron_name": "prune_old_snapshots",
+            "cron_description": "Deletes automated data dictionary snapshots beyond the configured retention count.",
+            "method": "pruneOldSnapshots",
+            "cron_frequency": "86400",
+            "cron_max_run_time": "3600"
         }
     ]
 }

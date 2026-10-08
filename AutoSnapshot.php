@@ -11,8 +11,16 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
     /**
      * Retrieves the timestamp of the most recent data dictionary snapshot for a project.
      * Derived directly from REDCap's core MetaData::getLastDataDictionarySnapshot() SQL.
+     *
+     * "AND e.delete_date IS NULL" added after a real test against this dev instance: soft-deleting
+     * an edoc via Files::deleteFileByDocId() (as pruneOldSnapshots() now does) never touches
+     * redcap_data_dictionaries at all, so without this filter a pruned "most recent" snapshot
+     * would still be reported as the current last snapshot here -- invisible in Project Revision
+     * History, counting down to permanent deletion, yet this module would think a valid backup
+     * already exists and skip taking a new one.
+     *
      * @param int $project_id
-     * @return string|false YYYY-MM-DD HH:MM:SS format, or false if no snapshot exists.
+     * @return string|false YYYY-MM-DD HH:MM:SS format, or false if no (non-deleted) snapshot exists.
      */
     private function getLastSnapshotTimestamp($project_id)
     {
@@ -21,6 +29,7 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
             WHERE e.project_id = ?
             AND e.project_id = d.project_id
             AND d.doc_id = e.doc_id
+            AND e.delete_date IS NULL
             ORDER BY d.dd_id DESC
             LIMIT 1";
 
@@ -266,6 +275,51 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
         return max(0, (int)$value);
     }
 
+    /**
+     * Number of auto-generated snapshots to retain per project, per the project-overridable
+     * "Snapshot Retention Count" setting. Manually-taken snapshots (a real ui_id recorded) are
+     * never subject to this at all -- see pruneOldSnapshots(). getProjectSetting() itself already
+     * resolves a project's own override if set, falling back to the system-wide default
+     * otherwise (confirmed against ExternalModules::getProjectSetting()'s source) -- but that
+     * resolution is keyed off whatever project $this->setProjectId() last set, so this must only
+     * be called after that's been done for the project in question (the documented pattern for
+     * reading a project-scoped setting from within a cron; see crons.md "Setting a Project
+     * Context Within a Cron").
+     *
+     * @return int|null null if retention is disabled for this project (blank or 0 -- deliberately
+     *   treated as the same "off" state, so an admin uneasy about automated row deletion has an
+     *   explicit, unambiguous way to turn it off entirely rather than an implicit blank being the
+     *   only option), else the number of auto-snapshots to keep (always >= 1).
+     */
+    private function getSnapshotRetentionCount()
+    {
+        $value = $this->getProjectSetting('snapshot-retention-count');
+        if ($value === null || $value === '' || (int)$value <= 0) {
+            return null;
+        }
+        return (int)$value;
+    }
+
+    /**
+     * Deletes one old auto-generated snapshot: soft-deletes its edoc via core's own
+     * Files::deleteFileByDocId() (project-scoped -- the only core method that exists for this),
+     * then removes our own redcap_data_dictionaries row.
+     *
+     * @param int $project_id
+     * @param int $dd_id redcap_data_dictionaries primary key
+     * @param int $doc_id
+     * @return bool true if the snapshot was pruned
+     */
+    private function pruneProjectSnapshot($project_id, $dd_id, $doc_id)
+    {
+        if (!Files::deleteFileByDocId($doc_id, $project_id)) {
+            return false;
+        }
+
+        $this->query("DELETE FROM redcap_data_dictionaries WHERE dd_id = ? AND project_id = ?", [$dd_id, $project_id]);
+        return true;
+    }
+
     public function autoSnapshot($cronInfo) {
         foreach ($this->getProjectsWithModuleEnabled() as $localProjectId) {
             try {
@@ -388,6 +442,73 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
                 // Don't let one project's failure (e.g. a snapshot upload error) stop the rest
                 // of the loop from being checked.
                 $this->log("AutoSnapshot: error while processing project", [
+                    'project_id' => $localProjectId,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        return "The \"{$cronInfo['cron_description']}\" cron job completed successfully.";
+    }
+
+    /**
+     * Separate cron (deliberately not folded into autoSnapshot(): different concern, different
+     * natural cadence -- housekeeping once a day rather than every 30 minutes) that prunes
+     * auto-generated snapshots beyond each project's configured retention count.
+     *
+     * Deliberately does NOT replicate autoSnapshot()'s status/purpose filters: retention is an
+     * independent policy question from "should new automated snapshots be created here" -- a
+     * project that's since moved out of Development, or whose purpose got disabled, may still
+     * have a pile of old auto-snapshots worth pruning down to a sane count. It's still gated
+     * per-project by the retention-count setting itself (blank/0 = skip entirely), which an
+     * admin can leave unset for any project they don't want this cron touching at all.
+     */
+    public function pruneOldSnapshots($cronInfo) {
+        foreach ($this->getProjectsWithModuleEnabled() as $localProjectId) {
+            try {
+                $this->setProjectId($localProjectId);
+
+                $retentionCount = $this->getSnapshotRetentionCount();
+                if ($retentionCount === null) {
+                    continue; // Retention disabled for this project (blank or 0, default or override).
+                }
+
+                // Only auto-generated snapshots (ui_id IS NULL) are ever eligible for pruning --
+                // any snapshot with a real ui_id was taken by a human via core's own "Create
+                // Snapshot" button, and is kept forever regardless of count or age. e.delete_date
+                // IS NULL excludes anything an earlier run already pruned (idempotency: never
+                // re-attempt an already-soft-deleted edoc). Ordered newest-first so the first
+                // $retentionCount rows are the ones being kept; anything beyond that is a
+                // candidate for pruning -- which is exactly what guarantees the current latest
+                // snapshot can never be among them, closing the gap getLastSnapshotTimestamp()'s
+                // delete_date fix (above) also guards against independently.
+                $sql = "SELECT d.dd_id, d.doc_id
+                    FROM redcap_data_dictionaries d, redcap_edocs_metadata e
+                    WHERE d.project_id = ?
+                    AND e.project_id = ?
+                    AND d.doc_id = e.doc_id
+                    AND d.ui_id IS NULL
+                    AND e.delete_date IS NULL
+                    ORDER BY d.dd_id DESC";
+
+                $result = $this->query($sql, [$localProjectId, $localProjectId]);
+                $rows = [];
+                while ($result && ($row = $result->fetch_assoc())) {
+                    $rows[] = $row;
+                }
+
+                foreach (array_slice($rows, $retentionCount) as $candidate) {
+                    $pruned = $this->pruneProjectSnapshot($localProjectId, $candidate['dd_id'], $candidate['doc_id']);
+
+                    $this->log("AutoSnapshot: pruned old snapshot", [
+                        'project_id' => $localProjectId,
+                        'dd_id' => $candidate['dd_id'],
+                        'pruned' => $pruned ? 1 : 0,
+                    ]);
+                }
+            } catch (\Throwable $e) {
+                // Don't let one project's failure stop the rest of the loop from being processed.
+                $this->log("AutoSnapshot: error while pruning project", [
                     'project_id' => $localProjectId,
                     'error' => $e->getMessage(),
                 ]);
