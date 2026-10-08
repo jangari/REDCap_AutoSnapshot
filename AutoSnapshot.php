@@ -162,28 +162,38 @@ class AutoSnapshot extends \ExternalModules\AbstractExternalModule {
                 // 2. Fetch the last snapshot timestamp (using our core SQL method)
                 $last_snapshot_time = $this->getLastSnapshotTimestamp($localProjectId);
 
-                // 3. Format timestamp to match REDCap log style (YYYYMMDDHHMMSS)
-                // If false (no snapshot exists), default to 0 to capture ALL history
-                $formatted_snapshot_ts = $last_snapshot_time ? date("YmdHis", strtotime($last_snapshot_time)) : 0;
-
                 $this->log("AutoSnapshot: checking project for design changes", [
                     'project_id' => $localProjectId,
-                    'last_snapshot_ts' => (string)$formatted_snapshot_ts,
+                    'last_snapshot_time' => $last_snapshot_time === false ? null : $last_snapshot_time,
                 ]);
 
-                // 4. Query for metadata management modifications since the last snapshot
-                $sql = "SELECT ts
-                    FROM `$log_table`
-                    WHERE project_id = ?
-                    AND event = 'MANAGE'
-                    AND object_type = 'redcap_metadata'
-                    AND ts > ?
-                    LIMIT 1";
+                if ($last_snapshot_time === false) {
+                    // No snapshot has ever been taken for this project. Don't gate the very first
+                    // snapshot on finding a MANAGE/redcap_metadata log row: a project whose fields
+                    // arrived via Copy Project, a template/XML import, or a bulk Data Dictionary
+                    // upload never logs that event/object_type combination, so it would otherwise
+                    // never get backed up no matter how many times the cron runs. Confirmed against
+                    // a real project in this dev instance ("Declarations Template Project", copied
+                    // from another project): it has MANAGE log rows for redcap_projects/redcap_surveys/
+                    // redcap_econsent from the copy, but none for redcap_metadata, ever. Take an
+                    // unconditional baseline snapshot instead.
+                    $needsSnapshot = true;
+                } else {
+                    // 3. Otherwise, only snapshot again if something has changed since that baseline.
+                    $sql = "SELECT ts
+                        FROM `$log_table`
+                        WHERE project_id = ?
+                        AND event = 'MANAGE'
+                        AND object_type = 'redcap_metadata'
+                        AND ts > ?
+                        LIMIT 1";
 
-                $result = $this->query($sql, [$localProjectId, $formatted_snapshot_ts]);
+                    $result = $this->query($sql, [$localProjectId, date("YmdHis", strtotime($last_snapshot_time))]);
+                    $needsSnapshot = $result && $result->num_rows > 0;
+                }
 
-                if ($result && $result->num_rows > 0) {
-                    // A structural dictionary change happened! Take a new snapshot.
+                if ($needsSnapshot) {
+                    // A structural dictionary change happened (or this is the first-ever snapshot).
                     $snapshotCreated = $this->createProjectDataDictionarySnapshot($localProjectId);
 
                     $this->log("AutoSnapshot: design change detected", [
