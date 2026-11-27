@@ -1,13 +1,8 @@
 {
-
     "name": "Auto Snapshot",
-
     "namespace": "INTERSECT\\AutoSnapshot",
-
-    "description": "Take automatic snapshots of the project metadata while in development.",
-
+    "description": "Take automatic snapshots of a project's metadata while in development.",
     "documentation": "README.md",
-
     "authors": [
         {
             "name": "Aidan Wilson",
@@ -15,9 +10,7 @@
             "institution": "Intersect Australia"
         }
     ],
-
-    "framework-version": 16,
-
+    "framework-version": 17,
     "system-settings": [
         {
             "key": "enable-purpose-practice",
@@ -46,7 +39,7 @@
         },
         {
             "key": "design-settle-window-minutes",
-            "name": "<strong>Design Change Settle Window (in minutes)</strong><br/><em>Optional. A snapshot is taken only after this many minutes have passed with no further data dictionary changes, so a multi-edit Online Designer session (including natural pauses to test a field or survey before coming back to adjust it) is captured once at its clean end-state rather than mid-edit. Checked once per cron run (every 30 minutes by default -- see <code>cron_frequency</code> in config.json), so actual latency is this value plus up to one cron interval. Leave blank to use the default of 60 minutes.</em>",
+            "name": "<strong>Design Change Settle Window (in minutes)</strong><br/><em>Optional. A snapshot is taken only after this many minutes have passed with no further data dictionary changes, so a multi-edit Online Designer session (including natural pauses to test a field or survey before coming back to adjust it) is captured once at its clean end-state rather than mid-edit. Checked once per cron run (every 30 minutes by default - see <code>cron_frequency</code> in config.json), so actual latency is this value plus up to one cron interval. Leave blank to use the default of 61 minutes.</em>",
             "type": "text",
             "validation": "integer"
         },
@@ -58,14 +51,13 @@
         },
         {
             "key": "snapshot-retention-count",
-            "name": "<strong>Snapshot Retention Count</strong><br/><em>Optional. The number of automated snapshots to keep per project; older automated snapshots beyond this count are deleted by the separate \"Prune Old Snapshots\" cron. Snapshots taken manually (via the Design page's own \"Create Snapshot\" button) are never deleted, regardless of this setting. Leave blank or enter 0 to disable pruning entirely -- no automated snapshot is ever deleted. Can be overridden per project below.</em>",
+            "name": "<strong>Snapshot Retention Count</strong><br/><em>Optional. The number of automated snapshots to keep per project; older automated snapshots beyond this count are deleted by the separate \"Prune Old Snapshots\" cron. Snapshots taken manually (via the Design page's own \"Create Snapshot\" button) are never deleted, regardless of this setting. Leave blank or enter 0 to disable pruning entirely; no automated snapshot is ever deleted. Can be overridden per project below.</em>",
             "type": "text",
             "validation": "integer",
             "allow-project-overrides": true,
             "project-name": "<strong>Snapshot Retention Count Override</strong><br/><em>Leave blank to use the system-wide default.</em>"
         }
     ],
-
     "crons": [
         {
             "cron_name": "auto_snapshot",
